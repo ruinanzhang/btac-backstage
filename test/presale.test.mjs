@@ -46,11 +46,11 @@ function fixture() {
   };
 }
 
-async function setup(f) {
+async function setup(f, values = details) {
   const band = await f.request("/bands/new", {user:owner, form:{name:"BTAC", accent:"#5147bd"}});
   assert.equal(band.status, 303);
   assert.equal(band.headers.get("location"), "/bands/btac");
-  const draft = await f.request("/bands/btac/new", {user:owner, form:details});
+  const draft = await f.request("/bands/btac/new", {user:owner, form:values});
   assert.equal(draft.status, 303);
   return {
     admin:draft.headers.get("location"),
@@ -58,6 +58,24 @@ async function setup(f) {
     id:f.sql.prepare("SELECT id FROM presales").get().id,
   };
 }
+
+test("an elapsed opening time can be saved as a draft, with a future opening required to publish", async () => {
+  const f = fixture();
+  const elapsed = {...details, opens:"2026-11-27T10:00"};
+  const {admin, fan, id} = await setup(f, elapsed);
+
+  const draftPage = await (await f.request(admin, {user:owner})).text();
+  assert.match(draftPage, /Draft saved/);
+  assert.match(draftPage, /<button[^>]* disabled>Publish<\/button>/);
+  assert.equal((await f.request(admin+"/publish", {user:owner, form:{}})).status, 422);
+  assert.equal((await f.request(fan)).status, 404);
+
+  assert.equal((await f.request(admin+"/edit", {user:owner, form:details})).status, 303);
+  assert.equal((await f.request(admin+"/publish", {user:owner, form:{}})).status, 303);
+  assert.equal((await f.request(admin+"/edit", {user:owner, form:elapsed})).status, 422);
+  assert.equal(f.sql.prepare("SELECT opens_at FROM presales WHERE id = ?").get(id).opens_at, opening);
+  f.sql.close();
+});
 
 test("a band can publish its own branded page, while the draft and dashboard stay protected", async () => {
   const f = fixture();

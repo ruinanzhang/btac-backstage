@@ -18,6 +18,7 @@ const notices = {
   saved: "Presale updated.",
   partner: "Partner link added.",
 };
+const futureOpening = "Set “Presale opens” to a future time in the selected time zone.";
 
 async function readForm(request) {
   const origin = request.headers.get("origin");
@@ -130,7 +131,7 @@ async function bandRoute(ctx, [bandSlug, section, presaleSlug, action, ...rest])
   if (section === "new" && !presaleSlug) {
     if (!post) return editor(scoped, null, {});
     try {
-      const data = validatePresale(form, now);
+      const data = validatePresale(form);
       const slug = await addWithSlug(data.title, (id, slug) => store.createPresale(id, band.id, slug, data, now));
       return redirect(managePath(band, {slug}));
     } catch (error) {
@@ -159,8 +160,9 @@ async function bandRoute(ctx, [bandSlug, section, presaleSlug, action, ...rest])
   if (action === "edit") {
     if (sale.published_at && sale.opens_at <= now) return renderDetails("This presale has already opened and can no longer be edited.");
     try {
-      const data = validatePresale(form, now);
-      if (!await store.editPresale(sale.id, data, now)) throw new Invalid("The presale opened before your changes were saved.");
+      const data = validatePresale(form);
+      if (sale.published_at && data.opensAt <= now) throw new Invalid(futureOpening);
+      if (!await store.editPresale(sale.id, data, now)) throw new Invalid("The presale status changed. Reload the page before editing.");
       return redirect(path + "?notice=saved");
     } catch (error) {
       return editor(scoped, sale, {error:inputNotice(error), values:Object.fromEntries(form)});
@@ -169,7 +171,7 @@ async function bandRoute(ctx, [bandSlug, section, presaleSlug, action, ...rest])
 
   if (action === "publish") {
     if (sale.published_at) return redirect(path);
-    if (!await store.publish(sale.id, now)) return renderDetails("Set a future presale opening time before publishing.");
+    if (!await store.publish(sale.id, now)) return renderDetails(futureOpening);
     return redirect(path + "?notice=published");
   }
 

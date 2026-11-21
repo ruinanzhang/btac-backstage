@@ -136,7 +136,8 @@ export function editor(ctx, presale, {error, values}) {
       <label>Description <span class="optional">Optional</span><textarea name="description" rows="3" maxlength="650" placeholder="Add a short note for fans.">${v("description")}</textarea></label>
       <div class="field-grid">
         <label>Event date and time<input name="event" type="datetime-local" required value="${v("event")}"></label>
-        <label>Presale opens<input name="opens" type="datetime-local" required value="${v("opens")}"></label>
+        <div><label>Presale opens<input name="opens" type="datetime-local" required value="${v("opens")}" aria-describedby="opening-help"></label>
+          <p class="optional" id="opening-help">Choose a future time before publishing.</p></div>
       </div>
       <label>Time zone<input name="timezone" list="timezones" maxlength="60" required value="${h(zone)}" ${presale || values ? "" : "data-auto-zone"}></label>
       <datalist id="timezones">${timezones.map((z) => `<option value="${z}"></option>`).join("")}</datalist>
@@ -152,11 +153,12 @@ export function detail(ctx, sale, stats, {now, origin, emailReady, notice, error
   const page = fanPath(band.slug, sale.slug);
   const url = new URL(page, origin).href;
   const published = !!sale.published_at;
+  const needsLaterOpening = !published && sale.opens_at <= now;
   const editable = !published || sale.opens_at > now;
   const action = published
     ? `<a class="button primary" href="${page}" target="_blank" rel="noopener">View fan page</a>`
     : `<a class="button" href="${path}/preview" target="_blank" rel="noopener">Preview fan page</a>
-      <form method="post" action="${path}/publish"><button class="button primary" type="submit">Publish</button></form>`;
+      <form method="post" action="${path}/publish"><button class="button primary" type="submit"${needsLaterOpening ? " disabled" : ""}>Publish</button></form>`;
   const source = (name, signups, clicks, code) => {
     const link = code ? `${url}?via=${encodeURIComponent(code)}` : url;
     return `<tr><th scope="row">${h(name)}</th><td>${number(signups)}</td><td>${number(clicks)}</td>
@@ -167,7 +169,9 @@ export function detail(ctx, sale, stats, {now, origin, emailReady, notice, error
     <div class="page-heading detail-heading"><div><div class="title-line"><h1>${h(sale.title)}</h1>${pill(sale, now)}</div>
       <p>${h(dateLabel(sale.event_at, sale.timezone))}${sale.venue ? ` <span class="dot-separator">·</span> ${h(sale.venue)}` : ""}</p></div>
       <div class="header-actions">${editable ? `<a class="button" href="${path}/edit">Edit</a>` : ""}${action}</div></div>
-    ${message(error || notice, Boolean(error))}
+    ${needsLaterOpening && !error
+      ? `<p class="notice" role="status">Draft saved. <a href="${path}/edit"><u>Set “Presale opens” to a future time</u></a> to publish.</p>`
+      : message(error || notice, Boolean(error))}
     <div class="stats" aria-label="Presale totals">
       <div class="panel stat"><span>Signups</span><strong>${number(stats.signups)}</strong></div>
       <div class="panel stat"><span>Ticket-link clicks</span><strong>${number(stats.clicks)}</strong></div>

@@ -50,7 +50,7 @@ function timeInZone(input, zone) {
   return matches.values().next().value;
 }
 
-export function validatePresale(form, now) {
+export function validatePresale(form) {
   const title = value(form, "title", 100, {label: "an event name"});
   const venue = value(form, "venue", 120, {required: false, label: "the venue"});
   const description = value(form, "description", 650, {required: false, label: "the description"});
@@ -63,7 +63,6 @@ export function validatePresale(form, now) {
   }
   const eventAt = timeInZone(value(form, "event", 16, {label: "an event date and time"}), timezone);
   const opensAt = timeInZone(value(form, "opens", 16, {label: "a presale opening time"}), timezone);
-  if (opensAt <= now) throw new Invalid("Set the presale opening time in the future.");
   if (opensAt >= eventAt) throw new Invalid("The presale must open before the event.");
   let ticket;
   try {

@@ -32,8 +32,8 @@ export function createStore(db) {
     `, id, band, slug, data.title, data.venue, data.description, data.eventAt, data.opensAt, data.timezone, data.ticketUrl, now).first(),
     editPresale: (presale, data, now) => query(`
       UPDATE presales SET title = ?, venue = ?, description = ?, event_at = ?, opens_at = ?, timezone = ?, ticket_url = ?
-      WHERE id = ? AND (published_at IS NULL OR opens_at > ?) RETURNING id
-    `, data.title, data.venue, data.description, data.eventAt, data.opensAt, data.timezone, data.ticketUrl, presale, now).first(),
+      WHERE id = ? AND (published_at IS NULL OR (opens_at > ? AND ? > ?)) RETURNING id
+    `, data.title, data.venue, data.description, data.eventAt, data.opensAt, data.timezone, data.ticketUrl, presale, now, data.opensAt, now).first(),
     publish: (presale, now) => query(`
       UPDATE presales SET published_at = ?
       WHERE id = ? AND published_at IS NULL AND opens_at > ? RETURNING id
