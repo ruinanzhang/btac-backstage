@@ -9,6 +9,43 @@ export function createStore(db) {
   const run = (sql, ...values) => query(sql, ...values).run();
   const all = async (sql, ...values) => (await query(sql, ...values).all()).results;
 
+  function deliveryQueue(channel) {
+    const text = channel === "text";
+    const table = text ? "text_signups" : "signups";
+    const address = text ? "phone" : "email";
+    // Only email jobs can resume an expired lease. The email provider deduplicates retries.
+    const eligible = text ? "('pending')" : "('pending', 'sending')";
+    const expiredText = text ? "OR delivery = 'sending'" : "";
+    return {
+      expireLeases: (now, oldestRetry) => run(`
+        UPDATE ${table} SET delivery = 'failed', lease_id = NULL
+        WHERE next_attempt_at <= ? AND
+          ((delivery IN ${eligible} AND first_attempt_at <= ?) ${expiredText})
+      `, now, oldestRetry),
+      due: (now, limit) => all(`
+        SELECT s.id, s.${address}, s.ticket_token, p.title, b.name AS band_name
+        FROM ${table} s JOIN presales p ON p.id = s.presale_id JOIN bands b ON b.id = p.band_id
+        WHERE p.published_at IS NOT NULL AND p.opens_at <= ? AND p.event_at > ?
+          AND s.delivery IN ${eligible} AND s.next_attempt_at <= ?
+        ORDER BY p.opens_at, s.consented_at LIMIT ?
+      `, now, now, now, limit),
+      claim: (id, leaseId, now, until) => first(`
+        UPDATE ${table} SET delivery = 'sending', attempts = attempts + 1,
+          first_attempt_at = COALESCE(first_attempt_at, ?), lease_id = ?, next_attempt_at = ?
+        WHERE id = ? AND delivery IN ${eligible} AND next_attempt_at <= ?
+        RETURNING attempts
+      `, now, leaseId, until, id, now),
+      complete: (id, leaseId, now) => run(`
+        UPDATE ${table} SET delivery = 'sent', sent_at = ?, lease_id = NULL
+        WHERE id = ? AND lease_id = ?
+      `, now, id, leaseId),
+      retry: (id, leaseId, state, nextAt) => run(`
+        UPDATE ${table} SET delivery = ?, next_attempt_at = ?, lease_id = NULL
+        WHERE id = ? AND lease_id = ?
+      `, state, nextAt, id, leaseId),
+    };
+  }
+
   return {
     bands: (owner) => all("SELECT * FROM bands WHERE owner_id = ? ORDER BY created_at", owner),
     band: (owner, slug) => first("SELECT * FROM bands WHERE owner_id = ? AND slug = ?", owner, slug),
@@ -19,7 +56,7 @@ export function createStore(db) {
 
     presales: (band) => all(`
       SELECT p.*,
-        (SELECT COUNT(*) FROM signups s WHERE s.presale_id = p.id) AS signups,
+        (SELECT COUNT(*) FROM fan_signups s WHERE s.presale_id = p.id) AS signups,
         (SELECT COUNT(*) FROM clicks c WHERE c.presale_id = p.id) AS clicks
       FROM presales p WHERE p.band_id = ? ORDER BY p.created_at DESC
     `, band),
@@ -48,66 +85,75 @@ export function createStore(db) {
     stats: async (presale) => {
       const results = await db.batch([
         query(`
-          SELECT COUNT(*) AS signups, COUNT(updates_opt_in_at) AS updates,
-            COUNT(CASE WHEN delivery = 'sent' THEN 1 END) AS sent,
-            COUNT(CASE WHEN delivery = 'failed' THEN 1 END) AS failed
-          FROM signups WHERE presale_id = ?
+          SELECT COUNT(*) AS signups, COUNT(CASE WHEN updates_opted_in THEN 1 END) AS updates
+          FROM fan_signups WHERE presale_id = ?
         `, presale),
         query(`
           SELECT id, name, code,
-            (SELECT COUNT(*) FROM signups s WHERE s.presale_id = ? AND s.partner_id = p.id) AS signups,
+            (SELECT COUNT(*) FROM fan_signups s WHERE s.presale_id = ? AND s.partner_id = p.id) AS signups,
             (SELECT COUNT(*) FROM clicks c WHERE c.presale_id = ? AND c.partner_id = p.id) AS clicks
           FROM partners p WHERE p.presale_id = ? ORDER BY created_at, name
         `, presale, presale, presale),
         query(`
           SELECT COUNT(*) AS clicks, COUNT(CASE WHEN partner_id IS NULL THEN 1 END) AS direct_clicks,
-            (SELECT COUNT(*) FROM signups WHERE presale_id = ? AND partner_id IS NULL) AS direct_signups
+            (SELECT COUNT(*) FROM fan_signups WHERE presale_id = ? AND partner_id IS NULL) AS direct_signups
           FROM clicks WHERE presale_id = ?
         `, presale, presale),
+        ...["signups", "text_signups"].map((table) => query(`
+          SELECT COUNT(*) AS recipients, COUNT(CASE WHEN delivery = 'sent' THEN 1 END) AS sent,
+            COUNT(CASE WHEN delivery = 'failed' THEN 1 END) AS failed
+          FROM ${table} WHERE presale_id = ?
+        `, presale)),
       ]);
-      const [totals, partners, clicks] = results.map((result) => result.results);
-      return { ...totals[0], ...clicks[0], partners };
+      const [totals, partners, clicks, email, text] = results.map((result) => result.results);
+      return { ...totals[0], ...clicks[0], partners, delivery: {email:email[0], text:text[0]} };
     },
-    signup: (id, presale, email, partner, updates, token, now) => query(`
-      INSERT INTO signups (id, presale_id, partner_id, email, consented_at, updates_opt_in_at, ticket_token)
-      SELECT ?, p.id, ?, ?, ?, ?, ? FROM presales p
-      WHERE p.id = ? AND p.published_at IS NOT NULL AND p.opens_at > ?
-      ON CONFLICT (presale_id, email) DO NOTHING RETURNING id
-    `, id, partner, email, now, updates ? now : null, token, presale, now).first(),
+    signup: (presale, partner, {email, phone, emailUpdates, textUpdates}, now) => {
+      const writes = [];
+      if (email) {
+        const id = crypto.randomUUID();
+        writes.push(query(`
+          INSERT INTO signups (id, presale_id, partner_id, email, consented_at, updates_opt_in_at, ticket_token)
+          SELECT ?, p.id, CASE WHEN t.id IS NULL THEN ? ELSE t.partner_id END, ?, ?, ?, ?
+          FROM presales p LEFT JOIN text_signups t
+            ON t.presale_id = p.id AND t.phone = ? AND t.email_signup_id IS NULL
+          WHERE p.id = ? AND p.published_at IS NOT NULL AND p.opens_at > ?
+          ON CONFLICT (presale_id, email) DO NOTHING
+        `, id, partner, email, now, emailUpdates ? now : null, crypto.randomUUID(), phone, presale, now));
+        if (phone) {
+          // Merge a prior text-only registration when this submission adds its email for the first time.
+          writes.push(query(`
+            UPDATE text_signups SET email_signup_id = ?
+            WHERE presale_id = ? AND phone = ? AND email_signup_id IS NULL
+              AND EXISTS (SELECT 1 FROM signups WHERE id = ?)
+          `, id, presale, phone, id));
+        }
+      }
+      if (phone) {
+        writes.push(query(`
+          INSERT INTO text_signups
+            (id, presale_id, partner_id, email_signup_id, phone, consented_at, updates_opt_in_at, ticket_token)
+          SELECT ?, p.id, CASE WHEN e.id IS NULL THEN ? ELSE e.partner_id END, e.id, ?, ?, ?, ?
+          FROM presales p LEFT JOIN signups e ON e.presale_id = p.id AND e.email = ?
+            AND NOT EXISTS (SELECT 1 FROM text_signups WHERE email_signup_id = e.id)
+          WHERE p.id = ? AND p.published_at IS NOT NULL AND p.opens_at > ?
+          ON CONFLICT (presale_id, phone) DO NOTHING
+        `, crypto.randomUUID(), partner, phone, now, textUpdates ? now : null, crypto.randomUUID(), email, presale, now));
+      }
+      return db.batch(writes);
+    },
     ticketForSignup: (token) => first(`
       SELECT p.id, p.ticket_url, p.opens_at, p.event_at, s.partner_id
-      FROM signups s JOIN presales p ON p.id = s.presale_id
-      WHERE s.ticket_token = ? AND p.published_at IS NOT NULL
-    `, token),
+      FROM (
+        SELECT presale_id, partner_id FROM signups WHERE ticket_token = ?
+        UNION ALL
+        SELECT presale_id, partner_id FROM text_signups WHERE ticket_token = ?
+      ) s JOIN presales p ON p.id = s.presale_id WHERE p.published_at IS NOT NULL
+    `, token, token),
     recordClick: (presale, partner, now) => run(`
       INSERT INTO clicks (id, presale_id, partner_id, clicked_at) VALUES (?, ?, ?, ?)
     `, crypto.randomUUID(), presale, partner, now),
 
-    expireLeases: (now, oldestRetry) => run(`
-      UPDATE signups SET delivery = 'failed', lease_id = NULL
-      WHERE delivery IN ('pending', 'sending') AND next_attempt_at <= ?
-        AND first_attempt_at <= ?
-    `, now, oldestRetry),
-    due: (now, limit) => all(`
-      SELECT s.id, s.email, s.ticket_token, s.attempts, p.title, b.name AS band_name
-      FROM signups s JOIN presales p ON p.id = s.presale_id JOIN bands b ON b.id = p.band_id
-      WHERE p.published_at IS NOT NULL AND p.opens_at <= ? AND p.event_at > ?
-        AND s.delivery IN ('pending', 'sending') AND s.next_attempt_at <= ?
-      ORDER BY p.opens_at, s.consented_at LIMIT ?
-    `, now, now, now, limit),
-    claim: (id, leaseId, now, until) => query(`
-      UPDATE signups SET delivery = 'sending', attempts = attempts + 1,
-        first_attempt_at = COALESCE(first_attempt_at, ?), lease_id = ?, next_attempt_at = ?
-      WHERE id = ? AND delivery IN ('pending', 'sending') AND next_attempt_at <= ?
-      RETURNING attempts
-    `, now, leaseId, until, id, now).first(),
-    complete: (id, leaseId, now) => run(`
-      UPDATE signups SET delivery = 'sent', sent_at = ?, lease_id = NULL
-      WHERE id = ? AND lease_id = ?
-    `, now, id, leaseId),
-    retry: (id, leaseId, state, nextAt) => run(`
-      UPDATE signups SET delivery = ?, next_attempt_at = ?, lease_id = NULL
-      WHERE id = ? AND lease_id = ?
-    `, state, nextAt, id, leaseId),
+    queues: { email: deliveryQueue("email"), text: deliveryQueue("text") },
   };
 }

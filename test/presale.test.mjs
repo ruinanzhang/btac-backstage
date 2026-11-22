@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { handleRequest } from "../src/app.mjs";
-import { dispatchDue } from "../src/mail.mjs";
+import { dispatchDue } from "../src/alerts.mjs";
 import { createStore } from "../src/store.mjs";
 
 const origin = "https://backstage.example";
@@ -14,10 +14,17 @@ const secondOwner = {userId:"another-band", displayName:"Another Band"};
 const dest = "https://tickets.example/presale";
 const details = {title:"Live in Brooklyn", venue:"Brooklyn, NY", timezone:"America/New_York",
   event:"2026-12-12T20:00", opens:"2026-12-05T10:00", ticket:dest};
+const textSender = {BACKSTAGE_PUBLIC_URL:origin, TWILIO_ACCOUNT_SID:"AC" + "a".repeat(32),
+  TWILIO_API_KEY_SID:"SK" + "b".repeat(32), TWILIO_API_KEY_SECRET:"test-secret",
+  TWILIO_MESSAGING_SERVICE_SID:"MG" + "c".repeat(32)};
+const acceptedText = () => Response.json({sid:"SM" + "d".repeat(32), status:"accepted"}, {status:201});
 
 function fixture() {
   const sql = new DatabaseSync(":memory:");
-  sql.exec(readFileSync(new URL("../drizzle/0000_petite_mongu.sql", import.meta.url), "utf8"));
+  const migrations = new URL("../drizzle/", import.meta.url);
+  for (const file of readdirSync(migrations).filter((name) => name.endsWith(".sql")).sort()) {
+    sql.exec(readFileSync(new URL(file, migrations), "utf8"));
+  }
   const db = {
     prepare(statement) {
       return {
@@ -31,7 +38,18 @@ function fixture() {
         },
       };
     },
-    batch: async (statements) => Promise.all(statements.map((statement) => statement.all())),
+    batch: async (statements) => {
+      sql.exec("BEGIN");
+      try {
+        const results = [];
+        for (const statement of statements) results.push(await statement.all());
+        sql.exec("COMMIT");
+        return results;
+      } catch (error) {
+        sql.exec("ROLLBACK");
+        throw error;
+      }
+    },
   };
   const env = {DB:db};
   return {
@@ -92,7 +110,8 @@ test("a band can publish its own branded page, while the draft and dashboard sta
   assert.match(publicPage, /Live in Brooklyn/);
   assert.match(publicPage, /Get first access/);
   assert.match(publicPage, new RegExp(`data-countdown="${opening}"`));
-  assert.match(publicPage, /name="updates" >/);
+  assert.match(publicPage, /name="channel" value="both"/);
+  assert.doesNotMatch(publicPage, /name="updates"[^>]+checked/);
 
   const newBand = await f.request("/bands/new", {user:secondOwner, form:{name:"Other Band", accent:"#315f72"}});
   const otherPath = newBand.headers.get("location");
@@ -168,9 +187,109 @@ test("email waits for opening, retries safely, and attributes the final ticket c
   assert.equal(click.headers.get("location"), dest);
   await f.request(fan+"/tickets", {now:sendTime, form:{}});
   const stats = await f.store.stats(id);
-  assert.equal(stats.sent, 1);
+  assert.equal(stats.delivery.email.sent, 1);
   assert.equal(stats.clicks, 2);
   assert.equal(stats.partners[0].clicks, 1);
   assert.equal(stats.direct_clicks, 1);
+  f.sql.close();
+});
+
+test("text requires consent, and choosing both counts as one signup at the original source", async () => {
+  const f = fixture();
+  const {admin, fan, id} = await setup(f);
+  await f.request(admin+"/publish", {user:owner, form:{}});
+  await f.request(admin+"/partners", {user:owner, form:{name:"Studio Radio"}});
+  const via = fan+"?via=studio-radio";
+  const phone = "+1 (212) 555-0100";
+  const refused = await f.request(via, {form:{channel:"both", email:"fan@example.com", phone}});
+  assert.equal(refused.status, 422);
+  assert.match(await refused.text(), /Confirm that you want the presale text/);
+  assert.equal((await f.store.stats(id)).signups, 0);
+
+  const textForm = {channel:"text", phone, text_consent:"on"};
+  assert.equal((await f.request(via, {form:textForm})).status, 303);
+  await f.request(fan, {form:{...textForm, phone:"+12125550100"}});
+  const [row] = f.sql.prepare("SELECT phone, consented_at, updates_opt_in_at FROM text_signups").all();
+  assert.equal(row.phone, "+12125550100");
+  assert.equal(row.consented_at, initial);
+  assert.equal(row.updates_opt_in_at, null);
+  assert.equal((await f.store.stats(id)).delivery.email.recipients, 0);
+
+  const both = {channel:"both", email:"fan@example.com", phone, text_consent:"on", updates:"on"};
+  await f.request(fan, {form:both});
+  await f.request(fan, {form:both});
+  const stats = await f.store.stats(id);
+  assert.equal(stats.signups, 1);
+  assert.equal(stats.updates, 1);
+  assert.equal(stats.partners[0].signups, 1);
+  assert.equal(stats.direct_signups, 0);
+  assert.equal(stats.delivery.email.recipients, 1);
+  assert.equal(stats.delivery.text.recipients, 1);
+  f.sql.close();
+});
+
+test("both channels send at opening with tracked links and recover from a text rate limit", async () => {
+  const f = fixture();
+  const {admin, fan, id} = await setup(f);
+  await f.request(admin+"/publish", {user:owner, form:{}});
+  await f.request(admin+"/partners", {user:owner, form:{name:"Studio Radio"}});
+  await f.request(fan+"?via=studio-radio", {
+    form:{channel:"both", email:"fan@example.com", phone:"+12125550100", text_consent:"on", text_updates:"on"},
+  });
+  const env = {...f.env, ...textSender, RESEND_API_KEY:"test-key", BACKSTAGE_FROM_EMAIL:"presale@example.com"};
+  const texts = [];
+  const emails = [];
+  const send = async (url, options) => {
+    if (url.startsWith("https://api.resend.com/")) {
+      emails.push(JSON.parse(options.body));
+      return new Response(null, {status:200});
+    }
+    assert.equal(url, `https://api.twilio.com/2010-04-01/Accounts/${textSender.TWILIO_ACCOUNT_SID}/Messages.json`);
+    texts.push(options.body);
+    return texts.length === 1 ? new Response(null, {status:429}) : acceptedText();
+  };
+  assert.equal((await dispatchDue(f.store, env, {now:opening-1, send})).checked, 0);
+  assert.equal(emails.length + texts.length, 0);
+  const first = await dispatchDue(f.store, env, {now:opening, send});
+  assert.equal(first.sent, 1);
+  assert.equal(first.retrying, 1);
+  const retryTime = opening + 60_000;
+  const results = await Promise.all([
+    dispatchDue(f.store, env, {now:retryTime, send}),
+    dispatchDue(f.store, env, {now:retryTime, send}),
+  ]);
+  assert.equal(results.reduce((count, result) => count + result.sent, 0), 1);
+  assert.equal(emails.length, 1);
+  assert.equal(texts.length, 2);
+  assert.equal(texts[1].get("To"), "+12125550100");
+  assert.equal(texts[1].get("MessagingServiceSid"), textSender.TWILIO_MESSAGING_SERVICE_SID);
+  const sms = texts[1].get("Body");
+  assert.match(sms, /BTAC via BTAC Backstage/);
+  assert.match(sms, /Reply STOP to unsubscribe/);
+  assert.ok(!sms.includes("+12125550100"));
+  const tracked = new URL(sms.match(/https:\/\/\S+/)[0]).pathname;
+  const click = await f.request(tracked, {now:retryTime, form:{}});
+  assert.equal(click.headers.get("location"), dest);
+  const stats = await f.store.stats(id);
+  assert.equal(stats.delivery.email.sent, 1);
+  assert.equal(stats.delivery.text.sent, 1);
+  assert.equal(stats.partners[0].clicks, 1);
+  assert.equal(stats.signups, 1);
+  assert.equal(stats.updates, 1);
+  f.sql.close();
+});
+
+test("an uncertain text send is recorded as failed without sending again", async () => {
+  const f = fixture();
+  const {admin, fan, id} = await setup(f);
+  await f.request(admin+"/publish", {user:owner, form:{}});
+  await f.request(fan, {form:{channel:"text", phone:"+12125550100", text_consent:"on"}});
+  const env = {...f.env, ...textSender};
+  let attempts = 0;
+  const send = async () => { attempts++; throw new Error("Timed out"); };
+  assert.equal((await dispatchDue(f.store, env, {now:opening, send})).failed, 1);
+  assert.equal((await dispatchDue(f.store, env, {now:opening+600_000, send})).checked, 0);
+  assert.equal(attempts, 1);
+  assert.equal((await f.store.stats(id)).delivery.text.failed, 1);
   f.sql.close();
 });

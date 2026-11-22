@@ -1,6 +1,29 @@
 const zone = document.querySelector("[data-auto-zone]");
 if (zone) zone.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
+const alertForm = document.querySelector("[data-alert-form]");
+if (alertForm) {
+  const groups = [...alertForm.querySelectorAll("[data-channel-fields]")];
+  const note = alertForm.querySelector("[data-alert-note]");
+  const readonly = alertForm.hasAttribute("data-readonly");
+  const updateFields = () => {
+    const channel = alertForm.elements.channel.value;
+    for (const group of groups) {
+      const show = channel === "both" || group.dataset.channelFields === channel;
+      group.hidden = !show;
+      for (const input of group.querySelectorAll("input")) {
+        input.disabled = !show || readonly;
+        input.required = show && !readonly && input.hasAttribute("data-channel-required");
+      }
+    }
+    if (note) note.textContent = note.dataset[channel];
+  };
+  alertForm.addEventListener("change", (event) => {
+    if (event.target.name === "channel") updateFields();
+  });
+  updateFields();
+}
+
 const countdown = document.querySelector("[data-countdown]");
 if (countdown) {
   const opensAt = Number(countdown.dataset.countdown);

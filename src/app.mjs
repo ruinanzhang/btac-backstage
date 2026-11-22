@@ -1,5 +1,5 @@
-import { authorizeDispatch, dispatchDue, dispatchReady } from "./mail.mjs";
-import { Invalid, slugify, validateEmail, validatePresale, value } from "./model.mjs";
+import { alertAvailability, authorizeDispatch, dispatchDue } from "./alerts.mjs";
+import { alertChannel, Invalid, slugify, validateFanSignup, validatePresale, value } from "./model.mjs";
 import { createStore } from "./store.mjs";
 import {
   createBandPage, dashboard, detail, editor, emailTicketPage, errorPage, fanPage, fanPath,
@@ -72,8 +72,9 @@ async function fanRoute(ctx, [band, slug, action, ...rest]) {
   const ref = checkedRef(url);
   const partner = ref ? await store.partner(sale.id, ref) : null;
   const partnerCode = partner?.code ?? "";
-  const options = {now, ref:partnerCode, deliveryEnabled:dispatchReady(ctx.env)};
-  if (!post && !action) return fanPage(sale, {...options, joined:url.searchParams.get("joined") === "1"});
+  const options = {now, ref:partnerCode, availability:alertAvailability(ctx.env)};
+  if (!post && !action) return fanPage(sale, {...options, joined:url.searchParams.get("joined") === "1",
+    channel:alertChannel(url.searchParams.get("channel"))});
   if (!post) return notFound();
 
   if (action === "tickets") {
@@ -83,16 +84,16 @@ async function fanRoute(ctx, [band, slug, action, ...rest]) {
   }
 
   if (now >= sale.opens_at) return redirect(fanPath(band, slug));
-  const after = new URLSearchParams({joined:"1"});
+  const channel = alertChannel(form.get("channel"));
+  const after = new URLSearchParams({joined:"1", channel});
   if (partnerCode) after.set("via", partnerCode);
   try {
     if (!form.get("website")) {
-      await store.signup(crypto.randomUUID(), sale.id, validateEmail(form), partner?.id ?? null,
-        form.get("updates") === "on", crypto.randomUUID(), now);
+      await store.signup(sale.id, partner?.id ?? null, validateFanSignup(form, channel), now);
     }
     return redirect(`${fanPath(band, slug)}?${after}`);
   } catch (error) {
-    return fanPage(sale, {...options, error:inputNotice(error)});
+    return fanPage(sale, {...options, channel, values:Object.fromEntries(form), error:inputNotice(error)});
   }
 }
 
@@ -144,7 +145,7 @@ async function bandRoute(ctx, [bandSlug, section, presaleSlug, action, ...rest])
   if (!sale) return notFound();
   const path = managePath(band, sale);
   const renderDetails = async (error) => detail(scoped, sale, await store.stats(sale.id), {
-    now, origin:url.origin, emailReady:dispatchReady(ctx.env), error,
+    now, origin:url.origin, availability:alertAvailability(ctx.env), error,
     notice: Object.hasOwn(notices, url.searchParams.get("notice")) ? notices[url.searchParams.get("notice")] : "",
   });
 
@@ -208,7 +209,7 @@ export async function handleRequest(request, {env, user = null, signIn = "/signi
   if (path === "/api/dispatch" && post) {
     if (!await authorizeDispatch(request, env.BACKSTAGE_DISPATCH_SECRET)) return json({error:"Unauthorized"}, 401);
     const counts = await dispatchDue(store, env, {now});
-    return counts ? json(counts) : json({error:"Email delivery is off"}, 503);
+    return counts ? json(counts) : json({error:"Alert delivery is off"}, 503);
   }
 
   if ((!area || area === "bands") && !user) {

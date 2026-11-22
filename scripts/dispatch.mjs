@@ -26,10 +26,10 @@ do {
         method: "POST", headers, signal: AbortSignal.timeout(30_000), redirect: "error",
       });
       if (!response.ok) throw new Error("Dispatch returned HTTP " + response.status);
-      const { checked, sent, retrying, failed } = await response.json();
+      const { checked, sent, retrying, failed, has_more } = await response.json();
       if (!Number.isInteger(checked)) throw new Error("Unexpected dispatch response.");
       if (checked > 0) console.log({ checked, sent, retrying, failed });
-      if (checked < 20) break;
+      if (!(has_more ?? (checked >= 20))) break;
       await sleep(1000);
     }
   } catch (error) {

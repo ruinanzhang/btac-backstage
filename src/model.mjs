@@ -82,6 +82,24 @@ export function validateEmail(form) {
   return email;
 }
 
+export function alertChannel(input) {
+  return input === "text" || input === "both" ? input : "email";
+}
+
+export function validateFanSignup(form, channel) {
+  const email = channel === "text" ? null : validateEmail(form);
+  let phone = null;
+  if (channel !== "email") {
+    phone = value(form, "phone", 40, {label:"your mobile number"}).replace(/[\s().-]/g, "");
+    if (!/^\+[1-9]\d{6,14}$/.test(phone)) {
+      throw new Invalid("Enter your mobile number with its country code, such as +1 212 555 0100.");
+    }
+    if (form.get("text_consent") !== "on") throw new Invalid("Confirm that you want the presale text.");
+  }
+  return {email, phone, emailUpdates:!!email && form.get("updates") === "on",
+    textUpdates:!!phone && form.get("text_updates") === "on"};
+}
+
 export function dateLabel(time, zone) {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: zone, weekday: "short", month: "short", day: "numeric", year: "numeric",

@@ -113,6 +113,7 @@ h2 { font-size: 1.125rem; letter-spacing: -.022em; line-height: 1.3; overflow-wr
 .block { padding: 1.15rem; margin-bottom: .875rem; }
 .block p { font-size: .9rem; margin-top: .2rem; }
 .launch { display: flex; justify-content: space-between; align-items: center; gap: .8rem; }
+.launch-channels { display: flex; gap: 1.35rem; }
 .launch-status { display: grid; text-align: right; }
 .launch-status strong { font-size: .875rem; }
 .launch-status span { color: var(--muted); font-size: .8125rem; }
@@ -164,6 +165,19 @@ label:has(:disabled) { color: var(--muted); }
 .countdown span, .open-date, .supporting { color: var(--muted); font-size: .82rem; }
 .open-date { margin-bottom: 1.15rem; }
 .fan-form { display: grid; gap: .8rem; }
+.channel-picker { margin: 0; padding: 0; border: 0; min-width: 0; }
+.channel-picker legend { padding: 0; margin: 0 0 .4rem; font-size: .875rem; font-weight: 620; }
+.channel-options { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 9px; padding: 3px; background: #f3f3f6; gap: 3px; }
+.channel-options label { position: relative; }
+.channel-options input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+.channel-options span { display: block; color: var(--muted); text-align: center; border-radius: 6px; padding: .4rem .2rem; border: 1px solid transparent; }
+.channel-options input:checked + span { background: var(--white); color: var(--ink); border-color: var(--line); }
+.channel-options input:focus-visible + span { outline: 3px solid #7466e4; outline-offset: 1px; }
+.channel-options input:disabled { cursor: default; }
+.channel-fields { display: grid; gap: .65rem; }
+.channel-fields[hidden], .fan-form:has(input[name="channel"][value="email"]:checked) [data-channel-fields="text"],
+.fan-form:has(input[name="channel"][value="text"]:checked) [data-channel-fields="email"] { display: none; }
+.contact-hint { margin-top: -.4rem; color: var(--muted); font-size: .8125rem; }
 .fan-form .button, .fan-body .full { min-height: 46px; }
 .fan-body > form:not(.fan-form) { margin-top: .9rem; }
 .check-label { display: flex; align-items: flex-start; gap: .55rem; font-weight: 450; color: #4c4c5b; }

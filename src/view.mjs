@@ -147,7 +147,7 @@ export function editor(ctx, presale, {error, values}) {
     </form>`});
 }
 
-export function detail(ctx, sale, stats, {now, origin, emailReady, notice, error}) {
+export function detail(ctx, sale, stats, {now, origin, availability, notice, error}) {
   const { band } = ctx;
   const path = managePath(band, sale);
   const page = fanPath(band.slug, sale.slug);
@@ -165,6 +165,13 @@ export function detail(ctx, sale, stats, {now, origin, emailReady, notice, error
       <td>${published ? `<button type="button" class="button compact" data-copy="${h(link)}">Copy link</button>`
         : '<span class="muted">Available after publishing</span>'}</td></tr>`;
   };
+  const deliveryStatus = (channel, label) => {
+    const stat = stats.delivery[channel];
+    return `<div class="launch-status"><strong>${label}</strong>
+      <span>${number(stat.recipients)} signed up</span>
+      <span>${availability[channel] ? `${number(stat.sent)} submitted${stat.failed ? ` · ${number(stat.failed)} failed` : ""}` : "Delivery off"}</span>
+    </div>`;
+  };
   return workspace({...ctx, title: sale.title, crumb: "Presales", status: error ? 422 : 200, content: `
     <div class="page-heading detail-heading"><div><div class="title-line"><h1>${h(sale.title)}</h1>${pill(sale, now)}</div>
       <p>${h(dateLabel(sale.event_at, sale.timezone))}${sale.venue ? ` <span class="dot-separator">·</span> ${h(sale.venue)}` : ""}</p></div>
@@ -177,9 +184,8 @@ export function detail(ctx, sale, stats, {now, origin, emailReady, notice, error
       <div class="panel stat"><span>Ticket-link clicks</span><strong>${number(stats.clicks)}</strong></div>
       <div class="panel stat"><span>Updates opt-ins</span><strong>${number(stats.updates)}</strong></div>
     </div>
-    <section class="panel block launch"><div><h2>Presale email</h2><p>${h(dateLabel(sale.opens_at, sale.timezone))}</p></div>
-      <div class="launch-status">${emailReady ? `<strong>${number(stats.sent)} sent</strong>${stats.failed ? `<span>${number(stats.failed)} failed</span>` : ""}`
-        : "<strong>Email delivery is off</strong><span>Signups are still recorded.</span>"}</div>
+    <section class="panel block launch"><div><h2>Presale alerts</h2><p>${h(dateLabel(sale.opens_at, sale.timezone))}</p></div>
+      <div class="launch-channels">${deliveryStatus("email", "Email")}${deliveryStatus("text", "Text")}</div>
     </section>
     <section class="panel block source-panel">
       <div class="source-heading"><div><h2>Traffic sources</h2><p>Use a separate link for each promo partner.</p></div>
@@ -193,7 +199,21 @@ export function detail(ctx, sale, stats, {now, origin, emailReady, notice, error
     <p class="sr-only" role="status" data-copy-status></p>`});
 }
 
-export function fanPage(sale, {now, ref = "", preview = false, joined = false, error = "", deliveryEnabled = false}) {
+const channelLabels = {email:"Email", text:"Text", both:"Both"};
+
+function alertNote(channel, {email, text}) {
+  if (channel === "email" && email) return "We’ll email the ticket link when the presale opens.";
+  if (channel === "text" && text) return "We’ll text the ticket link when the presale opens.";
+  if (channel === "both") {
+    if (email && text) return "We’ll email and text the ticket link when the presale opens.";
+    if (email) return "We’ll email the ticket link when the presale opens. Text alerts are unavailable.";
+    if (text) return "We’ll text the ticket link when the presale opens. Email alerts are unavailable.";
+  }
+  return "Alerts are unavailable. Return here when the presale opens to get tickets.";
+}
+
+export function fanPage(sale, {now, ref = "", preview = false, joined = false, error = "",
+  channel = "email", availability = {email:false, text:false}, values = {}}) {
   const page = fanPath(sale.band_slug, sale.slug);
   const via = ref ? `?via=${encodeURIComponent(ref)}` : "";
   const opening = sale.opens_at > now;
@@ -202,13 +222,36 @@ export function fanPage(sale, {now, ref = "", preview = false, joined = false, e
   const countdown = opening ? `<div class="countdown" role="timer" aria-label="Time until the presale opens" data-countdown="${sale.opens_at}" data-now="${now}">
     ${["Days", "Hours", "Mins", "Secs"].map((unit, index) => `<div><strong data-segment="${index}">–</strong><span>${unit}</span></div>`).join("")}
     </div>` : "";
-  const signup = `<form class="fan-form" method="post" action="${page}${via}">
-    <label>Email address<input name="email" type="email" maxlength="254" required placeholder="you@example.com" autocomplete="email" ${preview ? "disabled" : ""}></label>
+  const available = preview ? {email:true, text:true} : availability;
+  const notes = Object.fromEntries(Object.keys(channelLabels).map((mode) => [mode, alertNote(mode, available)]));
+  const disabled = preview ? "disabled" : "";
+  const signup = `<form class="fan-form" method="post" action="${page}${via}" data-alert-form${preview ? " data-readonly" : ""}>
+    <fieldset class="channel-picker">
+      <legend>How should we send your alert?</legend>
+      <div class="channel-options">${Object.entries(channelLabels).map(([mode, label]) =>
+        `<label><input type="radio" name="channel" value="${mode}" ${channel === mode ? "checked" : ""}><span>${label}</span></label>`
+      ).join("")}</div>
+    </fieldset>
+    <div class="channel-fields" data-channel-fields="email">
+      <label>Email address<input name="email" type="email" maxlength="254" data-channel-required
+        placeholder="you@example.com" autocomplete="email" value="${h(values.email?.slice(0, 254))}" ${disabled}></label>
+      <label class="check-label"><input type="checkbox" name="updates" ${values.updates === "on" ? "checked" : ""} ${disabled}>
+        I’d also like future email updates from ${h(sale.band_name)}.</label>
+    </div>
+    <div class="channel-fields" data-channel-fields="text">
+      <label>Mobile number<input name="phone" type="tel" maxlength="40" data-channel-required
+        placeholder="+1 212 555 0100" autocomplete="tel" value="${h(values.phone?.slice(0, 40))}" aria-describedby="mobile-hint" ${disabled}></label>
+      <p class="contact-hint" id="mobile-hint">Include your country code, such as +1.</p>
+      <label class="check-label"><input type="checkbox" name="text_consent" data-channel-required
+        ${values.text_consent === "on" ? "checked" : ""} ${disabled}>
+        I agree to one automated presale text from ${h(sale.band_name)} via BTAC Backstage. Message and data rates may apply. Reply STOP to opt out.</label>
+      <label class="check-label"><input type="checkbox" name="text_updates" ${values.text_updates === "on" ? "checked" : ""} ${disabled}>
+        I’d also like future texts from ${h(sale.band_name)}. Message frequency varies.</label>
+    </div>
     <input class="trap" tabindex="-1" name="website" autocomplete="off" aria-hidden="true">
-    <label class="check-label"><input type="checkbox" name="updates" ${preview ? "disabled" : ""}> I'd also like future updates from ${h(sale.band_name)}.</label>
-    <button class="button primary" type="submit" ${preview ? "disabled" : ""}>Get first access</button>
-    <p class="supporting">${preview || deliveryEnabled ? "We’ll email you the ticket link when the presale opens."
-      : "Email alerts are unavailable. Return here when the presale opens."}</p>
+    <button class="button primary" type="submit" ${disabled}>Get first access</button>
+    <p class="supporting" aria-live="polite" data-alert-note data-email="${h(notes.email)}"
+      data-text="${h(notes.text)}" data-both="${h(notes.both)}">${h(notes[channel])}</p>
   </form>`;
   const ready = `<form method="post" action="${page}/tickets${via}"><button class="button primary full" ${preview ? "disabled" : ""}>Get tickets</button></form>`;
   return html(sale.title, `<main class="fan-wrap" style="--accent:${h(sale.accent)}">
@@ -225,7 +268,7 @@ export function fanPage(sale, {now, ref = "", preview = false, joined = false, e
           : '<h2>Presale is open</h2>'}
         ${message(error, true)}
         ${closed ? "" : !opening ? ready : joined ? `<p class="joined" role="status"><strong>You’re on the list.</strong><br>
-          ${deliveryEnabled ? "Look for the ticket link in your inbox when the presale opens." : "Return here when the presale opens to get tickets."}</p>` : signup}
+          ${h(notes[channel])}</p>` : signup}
       </section>
     </div>
     <footer>Powered by <a href="/">BTAC Backstage</a></footer>
