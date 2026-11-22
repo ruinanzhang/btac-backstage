@@ -1,6 +1,9 @@
 const zone = document.querySelector("[data-auto-zone]");
 if (zone) zone.value = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
+const ticketDestination = document.querySelector("[data-ticket-destination]");
+if (ticketDestination) window.location.replace(ticketDestination.href);
+
 const alertForm = document.querySelector("[data-alert-form]");
 if (alertForm) {
   const groups = [...alertForm.querySelectorAll("[data-channel-fields]")];

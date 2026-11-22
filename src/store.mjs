@@ -75,6 +75,10 @@ export function createStore(db) {
       UPDATE presales SET published_at = ?
       WHERE id = ? AND published_at IS NULL AND opens_at > ? RETURNING id
     `, now, presale, now).first(),
+    updateTicketUrl: (presale, url, now) => first(`
+      UPDATE presales SET ticket_url = ?
+      WHERE id = ? AND published_at IS NOT NULL AND event_at > ? RETURNING id
+    `, url, presale, now),
     publicPresale: (band, slug) => first(`${presaleDetails} WHERE b.slug = ? AND p.slug = ? AND p.published_at IS NOT NULL`, band, slug),
 
     partner: (presale, code) => first("SELECT id, code FROM partners WHERE presale_id = ? AND code = ?", presale, code),

@@ -1,9 +1,9 @@
 import { alertAvailability, authorizeDispatch, dispatchDue } from "./alerts.mjs";
-import { alertChannel, Invalid, slugify, validateFanSignup, validatePresale, value } from "./model.mjs";
+import { alertChannel, Invalid, slugify, ticketDestination, validateFanSignup, validatePresale, validateTicketUrl, value } from "./model.mjs";
 import { createStore } from "./store.mjs";
 import {
   createBandPage, dashboard, detail, editor, emailTicketPage, errorPage, fanPage, fanPath,
-  managePath, signInPage,
+  managePath, signInPage, ticketEditor, ticketHandoffPage,
 } from "./view.mjs";
 
 const safeRef = /^[a-z0-9-]{1,56}$/;
@@ -17,6 +17,7 @@ const notices = {
   published: "Your signup page is published. Share its link with fans.",
   saved: "Presale updated.",
   partner: "Partner link added.",
+  ticket: "Ticket link updated.",
 };
 const futureOpening = "Set “Presale opens” to a future time in the selected time zone.";
 
@@ -27,7 +28,7 @@ async function readForm(request) {
   }
   if (!request.headers.get("content-type")?.startsWith("application/x-www-form-urlencoded")) return null;
   const body = request.body?.getReader();
-  if (!body) return null;
+  if (!body) return new URLSearchParams();
   const decoder = new TextDecoder();
   let text = "";
   let size = 0;
@@ -79,8 +80,10 @@ async function fanRoute(ctx, [band, slug, action, ...rest]) {
 
   if (action === "tickets") {
     if (now < sale.opens_at || now >= sale.event_at) return redirect(fanPath(band, slug));
+    const destination = ticketDestination(sale.ticket_url);
+    if (!destination) return fanPage(sale, options);
     await store.recordClick(sale.id, partner?.id ?? null, now);
-    return redirect(sale.ticket_url);
+    return ticketHandoffPage(destination);
   }
 
   if (now >= sale.opens_at) return redirect(fanPath(band, slug));
@@ -102,9 +105,11 @@ async function ticketRoute(ctx, [token, ...rest]) {
   if (!tokenPattern.test(token ?? "") || rest.length) return notFound();
   const sale = await store.ticketForSignup(token);
   if (!sale || now < sale.opens_at || now >= sale.event_at) return notFound();
+  const destination = ticketDestination(sale.ticket_url);
+  if (!destination) return errorPage(409, "Ticket link unavailable", "Check back later for the ticket link.");
   if (!post) return emailTicketPage({token});
   await store.recordClick(sale.id, sale.partner_id, now);
-  return redirect(sale.ticket_url);
+  return ticketHandoffPage(destination);
 }
 
 async function bandRoute(ctx, [bandSlug, section, presaleSlug, action, ...rest]) {
@@ -148,6 +153,18 @@ async function bandRoute(ctx, [bandSlug, section, presaleSlug, action, ...rest])
     now, origin:url.origin, availability:alertAvailability(ctx.env), error,
     notice: Object.hasOwn(notices, url.searchParams.get("notice")) ? notices[url.searchParams.get("notice")] : "",
   });
+
+  if (action === "ticket" && sale.published_at && sale.event_at > now) {
+    if (!post) return ticketEditor(scoped, sale);
+    try {
+      const destination = ticketDestination(validateTicketUrl(form));
+      if (!destination) throw new Invalid("Enter the ticket seller’s URL. A placeholder address can’t open tickets.");
+      if (!await store.updateTicketUrl(sale.id, destination, now)) return renderDetails("This presale has ended.");
+      return redirect(path + "?notice=ticket");
+    } catch (error) {
+      return ticketEditor(scoped, sale, {error:inputNotice(error), ticket:form.get("ticket")});
+    }
+  }
 
   if (!post) {
     if (!action) return renderDetails();

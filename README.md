@@ -9,6 +9,7 @@ Create an independent workspace for your band. Each workspace can publish a bran
 3. Add promo partners on the presale screen. Copy each partner’s link after publishing. Email addresses and numbers are deduplicated per presale. A signup with both channels counts once and retains its original source.
 4. Fans can choose Email, Text, or Both. The form asks them to consent before enrolling a mobile number. Future updates are optional and recorded separately for each channel.
 5. Once the presale opens, fans can continue to the ticket seller. The dashboard counts clicks through to the seller, including repeat clicks, separately from signups. It does not count sales.
+6. If the ticket destination changes after opening, use **Edit ticket link** on the presale dashboard. Placeholder domains such as `tickets.example` show as unavailable on the fan page.
 
 ## Run locally
 

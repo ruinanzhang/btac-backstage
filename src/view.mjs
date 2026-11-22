@@ -1,4 +1,4 @@
-import { dateLabel, localInput, presaleStatus } from "./model.mjs";
+import { dateLabel, localInput, presaleStatus, ticketDestination } from "./model.mjs";
 
 export function escapeHtml(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
@@ -14,7 +14,7 @@ const bandPath = (band) => `/bands/${band.slug}`;
 export const managePath = (band, presale) => `${bandPath(band)}/presales/${presale.slug}`;
 export const fanPath = (bandSlug, presaleSlug) => `/p/${bandSlug}/${presaleSlug}`;
 
-function html(title, content, status = 200) {
+function html(title, content, status = 200, referrerPolicy = "strict-origin-when-cross-origin") {
   return new Response(`<!doctype html>
     <html lang="en"><head><meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -26,7 +26,7 @@ function html(title, content, status = 200) {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Content-Security-Policy": "default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self'; form-action 'self'; base-uri 'none'",
-      "Referrer-Policy": "strict-origin-when-cross-origin",
+      "Referrer-Policy": referrerPolicy,
       "X-Content-Type-Options": "nosniff",
     },
   });
@@ -155,6 +155,10 @@ export function detail(ctx, sale, stats, {now, origin, availability, notice, err
   const published = !!sale.published_at;
   const needsLaterOpening = !published && sale.opens_at <= now;
   const editable = !published || sale.opens_at > now;
+  const ticketEditable = published && sale.event_at > now;
+  const ticketMissing = !ticketDestination(sale.ticket_url);
+  const editAction = editable ? `<a class="button" href="${path}/edit">Edit</a>`
+    : ticketEditable ? `<a class="button" href="${path}/ticket">Edit ticket link</a>` : "";
   const action = published
     ? `<a class="button primary" href="${page}" target="_blank" rel="noopener">View fan page</a>`
     : `<a class="button" href="${path}/preview" target="_blank" rel="noopener">Preview fan page</a>
@@ -175,10 +179,12 @@ export function detail(ctx, sale, stats, {now, origin, availability, notice, err
   return workspace({...ctx, title: sale.title, crumb: "Presales", status: error ? 422 : 200, content: `
     <div class="page-heading detail-heading"><div><div class="title-line"><h1>${h(sale.title)}</h1>${pill(sale, now)}</div>
       <p>${h(dateLabel(sale.event_at, sale.timezone))}${sale.venue ? ` <span class="dot-separator">·</span> ${h(sale.venue)}` : ""}</p></div>
-      <div class="header-actions">${editable ? `<a class="button" href="${path}/edit">Edit</a>` : ""}${action}</div></div>
+      <div class="header-actions">${editAction}${action}</div></div>
     ${needsLaterOpening && !error
       ? `<p class="notice" role="status">Draft saved. <a href="${path}/edit"><u>Set “Presale opens” to a future time</u></a> to publish.</p>`
       : message(error || notice, Boolean(error))}
+    ${ticketMissing && (editable || ticketEditable)
+      ? `<p class="notice error">The ticket URL is a placeholder. <a href="${path}/${ticketEditable ? "ticket" : "edit"}"><u>Update the ticket link</u></a> so fans can open tickets.</p>` : ""}
     <div class="stats" aria-label="Presale totals">
       <div class="panel stat"><span>Signups</span><strong>${number(stats.signups)}</strong></div>
       <div class="panel stat"><span>Ticket-link clicks</span><strong>${number(stats.clicks)}</strong></div>
@@ -197,6 +203,23 @@ export function detail(ctx, sale, stats, {now, origin, availability, notice, err
       <tbody>${source("Direct", stats.direct_signups, stats.direct_clicks, "")}${stats.partners.map((p) => source(p.name, p.signups, p.clicks, p.code)).join("")}</tbody></table></div>
     </section>
     <p class="sr-only" role="status" data-copy-status></p>`});
+}
+
+export function ticketEditor(ctx, sale, {error, ticket = sale.ticket_url} = {}) {
+  const path = managePath(ctx.band, sale);
+  return workspace({...ctx, title:"Edit ticket link", status:error ? 422 : 200, content:`
+    <div class="page-heading"><div><h1>Edit ticket link</h1><p>Choose where Get tickets sends fans for ${h(sale.title)}.</p></div></div>
+    ${message(error, true)}
+    <form class="panel editor" method="post" action="${path}/ticket">
+      <label>Ticket URL<input name="ticket" type="url" maxlength="2048" required value="${h(ticket?.slice(0, 2048))}" autofocus></label>
+      <div class="form-actions"><a class="button" href="${path}">Cancel</a>
+        <button class="button primary" type="submit">Save ticket link</button></div>
+    </form>`});
+}
+
+function ticketButton(action, disabled = false) {
+  return `<form method="post" action="${h(action)}"><input type="hidden" name="intent" value="tickets">
+    <button class="button primary full" type="submit"${disabled ? " disabled" : ""}>Get tickets</button></form>`;
 }
 
 const channelLabels = {email:"Email", text:"Text", both:"Both"};
@@ -253,7 +276,8 @@ export function fanPage(sale, {now, ref = "", preview = false, joined = false, e
     <p class="supporting" aria-live="polite" data-alert-note data-email="${h(notes.email)}"
       data-text="${h(notes.text)}" data-both="${h(notes.both)}">${h(notes[channel])}</p>
   </form>`;
-  const ready = `<form method="post" action="${page}/tickets${via}"><button class="button primary full" ${preview ? "disabled" : ""}>Get tickets</button></form>`;
+  const ready = ticketDestination(sale.ticket_url) ? ticketButton(`${page}/tickets${via}`, preview)
+    : '<p class="event-description">The ticket link is unavailable. Check back later.</p>';
   return html(sale.title, `<main class="fan-wrap" style="--accent:${h(sale.accent)}">
     ${preview ? '<p class="preview-bar">Fan page preview</p>' : ""}
     <div class="fan-card">
@@ -279,6 +303,13 @@ export function emailTicketPage(sale) {
   const action = `/t/${encodeURIComponent(sale.token)}`;
   return html("Get tickets", `<main class="fan-wrap"><div class="fan-card ticket-card">
     <div class="fan-body"><h1>Presale is open</h1><p>Continue to the ticket seller to get your tickets.</p>
-      <form method="post" action="${action}"><button class="button primary full">Get tickets</button></form></div>
+      ${ticketButton(action)}</div>
     </div><footer>Powered by BTAC Backstage</footer></main>`);
+}
+
+export function ticketHandoffPage(destination) {
+  return html("Opening tickets", `<main class="fan-wrap"><div class="fan-card ticket-card">
+    <div class="fan-body"><h1>Opening tickets</h1><p><a class="button primary full" data-ticket-destination
+      rel="noreferrer" href="${h(destination)}">Continue to tickets</a></p></div>
+    </div></main>`, 200, "no-referrer");
 }

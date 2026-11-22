@@ -64,16 +64,30 @@ export function validatePresale(form) {
   const eventAt = timeInZone(value(form, "event", 16, {label: "an event date and time"}), timezone);
   const opensAt = timeInZone(value(form, "opens", 16, {label: "a presale opening time"}), timezone);
   if (opensAt >= eventAt) throw new Invalid("The presale must open before the event.");
-  let ticket;
+  return {title, venue, description, timezone, eventAt, opensAt, ticketUrl:validateTicketUrl(form)};
+}
+
+function parseTicketUrl(raw) {
   try {
-    ticket = new URL(value(form, "ticket", 2048, {label: "the ticket URL"}));
+    const url = new URL(raw);
+    return url.protocol === "https:" && !url.username && !url.password ? url : null;
   } catch {
-    throw new Invalid("Enter a valid ticket URL beginning with https://.");
+    return null;
   }
-  if (ticket.protocol !== "https:" || ticket.username || ticket.password) {
-    throw new Invalid("Enter a valid ticket URL beginning with https://.");
-  }
-  return {title, venue, description, timezone, eventAt, opensAt, ticketUrl: ticket.href};
+}
+
+export function validateTicketUrl(form) {
+  const url = parseTicketUrl(value(form, "ticket", 2048, {label: "the ticket URL"}));
+  if (!url) throw new Invalid("Enter a valid ticket URL beginning with https://.");
+  return url.href;
+}
+
+export function ticketDestination(raw) {
+  const url = parseTicketUrl(raw);
+  if (!url) return null;
+  const host = url.hostname.replace(/\.$/, "");
+  if (/(^|\.)(example|invalid|test|localhost)$/.test(host) || /^127\./.test(host) || host === "[::1]") return null;
+  return url.href;
 }
 
 export function validateEmail(form) {

@@ -11,7 +11,7 @@ const initial = Date.parse("2026-12-01T12:00Z");
 const opening = Date.parse("2026-12-05T15:00Z");
 const owner = {userId:"btac-admin", displayName:"BTAC"};
 const secondOwner = {userId:"another-band", displayName:"Another Band"};
-const dest = "https://tickets.example/presale";
+const dest = "https://example.com/";
 const details = {title:"Live in Brooklyn", venue:"Brooklyn, NY", timezone:"America/New_York",
   event:"2026-12-12T20:00", opens:"2026-12-05T10:00", ticket:dest};
 const textSender = {BACKSTAGE_PUBLIC_URL:origin, TWILIO_ACCOUNT_SID:"AC" + "a".repeat(32),
@@ -148,6 +148,34 @@ test("signups use the first source and record future updates only when explicitl
   f.sql.close();
 });
 
+test("a band can replace a placeholder ticket URL after the presale opens", async () => {
+  const f = fixture();
+  const placeholder = "https://tickets.example/presale";
+  const {admin, fan, id} = await setup(f, {...details, ticket:placeholder});
+  await f.request(admin+"/publish", {user:owner, form:{}});
+  const now = opening+1000;
+  const fanPage = await (await f.request(fan, {now})).text();
+  assert.match(fanPage, /The ticket link is unavailable/);
+  await f.request(fan+"/tickets", {now, form:{}});
+  assert.equal((await f.store.stats(id)).clicks, 0);
+
+  const dashboard = await (await f.request(admin, {now, user:owner})).text();
+  assert.match(dashboard, /Edit ticket link/);
+  assert.equal((await f.request(admin+"/ticket", {now, user:secondOwner, form:{ticket:dest}})).status, 404);
+  assert.equal((await f.request(admin+"/ticket", {now, user:owner, form:{ticket:placeholder}})).status, 422);
+  assert.equal((await f.request(admin+"/ticket", {now, user:owner, form:{ticket:dest, opens:"2026-12-07T10:00"}})).status, 303);
+  const saved = f.sql.prepare("SELECT opens_at, ticket_url FROM presales WHERE id = ?").get(id);
+  assert.equal(saved.opens_at, opening);
+  assert.equal(saved.ticket_url, dest);
+
+  const click = await f.request(fan+"/tickets", {now, form:{intent:"tickets"}});
+  assert.equal(click.status, 200);
+  assert.equal(click.headers.get("referrer-policy"), "no-referrer");
+  assert.match(await click.text(), /data-ticket-destination\s+rel="noreferrer" href="https:\/\/example\.com\/"/);
+  assert.equal((await f.store.stats(id)).clicks, 1);
+  f.sql.close();
+});
+
 test("email waits for opening, retries safely, and attributes the final ticket click", async () => {
   const f = fixture();
   const {admin, fan, id} = await setup(f);
@@ -183,8 +211,8 @@ test("email waits for opening, retries safely, and attributes the final ticket c
   assert.equal((await f.request(`/t/${token}`, {now:sendTime})).status, 200);
   assert.equal((await f.store.stats(id)).clicks, 0);
   const click = await f.request(`/t/${token}`, {now:sendTime, form:{}});
-  assert.equal(click.status, 303);
-  assert.equal(click.headers.get("location"), dest);
+  assert.equal(click.status, 200);
+  assert.match(await click.text(), /href="https:\/\/example\.com\/">Continue to tickets/);
   await f.request(fan+"/tickets", {now:sendTime, form:{}});
   const stats = await f.store.stats(id);
   assert.equal(stats.delivery.email.sent, 1);
@@ -269,7 +297,8 @@ test("both channels send at opening with tracked links and recover from a text r
   assert.ok(!sms.includes("+12125550100"));
   const tracked = new URL(sms.match(/https:\/\/\S+/)[0]).pathname;
   const click = await f.request(tracked, {now:retryTime, form:{}});
-  assert.equal(click.headers.get("location"), dest);
+  assert.equal(click.status, 200);
+  assert.match(await click.text(), /href="https:\/\/example\.com\/">Continue to tickets/);
   const stats = await f.store.stats(id);
   assert.equal(stats.delivery.email.sent, 1);
   assert.equal(stats.delivery.text.sent, 1);
